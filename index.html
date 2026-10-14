@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <!-- 让页面在手机上也按实际屏幕宽度显示，避免缩放错乱 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Three.js 加载 GLB 模型</title>
+
+  <!--
+    页面样式：让 3D 画面铺满整个浏览器窗口。
+    canvas 是 Three.js 画图用的，我们把它固定在全屏。
+  -->
+  <style>
+    /* * 表示所有元素；去掉浏览器默认的内外边距 */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    /* html 和 body 都占满视口高度，避免出现滚动条 */
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111; /* 背景色：深灰，模型更醒目 */
+      font-family: "Microsoft YaHei", sans-serif;
+    }
+
+    /* Three.js 会创建一张 canvas 画布，这里让它铺满屏幕 */
+    canvas {
+      display: block; /* 去掉 canvas 作为行内元素时底部的小缝隙 */
+      width: 100%;
+      height: 100%;
+    }
+
+    /*
+      加载遮罩：盖住整页，正中间显示文字和进度条。
+      加载完成后由 JS 把整个 #loading 隐藏。
+    */
+    #loading {
+      position: fixed;
+      inset: 0; /* 铺满全屏，相当于 top/right/bottom/left 都是 0 */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.72);
+      color: #fff;
+      z-index: 30; /* 盖在 3D 画面和弹窗上面 */
+    }
+
+    #loading-text {
+      font-size: 16px;
+      margin-bottom: 14px;
+      letter-spacing: 1px;
+    }
+
+    /* 进度条外框 */
+    #loading-bar {
+      width: 260px;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    /* 进度条填充：宽度由 JS 从 0% 改到 100% */
+    #loading-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: #ffe566;
+      border-radius: 999px;
+      transition: width 0.15s linear;
+    }
+
+    /* 百分比数字 */
+    #loading-percent {
+      margin-top: 10px;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    /*
+      零件说明弹窗（美化版）：
+      - 默认隐藏
+      - 大屏：屏幕右侧垂直居中，不挡住模型
+      - 小屏：屏幕正中间
+      - 半透明黑底、白字、大圆角、阴影
+    */
+    #info-popup {
+      display: none; /* 默认隐藏，点击零件后由 JS 改为 block */
+      position: absolute;
+      right: 32px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 300px;
+      padding: 22px 22px 18px;
+      background: rgba(0, 0, 0, 0.78); /* 半透明黑色 */
+      color: #ffffff;                  /* 白色文字 */
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 16px;             /* 圆角 */
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55); /* 阴影 */
+      backdrop-filter: blur(8px);      /* 毛玻璃，让半透明更好看 */
+      z-index: 20;
+      line-height: 1.7;
+    }
+
+    /* 窄屏幕时改到正中间，避免贴边难看 */
+    @media (max-width: 720px) {
+      #info-popup {
+        right: auto;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: calc(100% - 40px);
+        max-width: 320px;
+      }
+    }
+
+    /* 弹窗标题 */
+    #info-popup h3 {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      letter-spacing: 0.5px;
+      color: #ffffff;
+    }
+
+    /* 弹窗正文 */
+    #info-popup p {
+      font-size: 14px;
+      color: #ffffff;
+      opacity: 0.92;
+    }
+
+    /* 关闭按钮 */
+    #popup-close {
+      margin-top: 16px;
+      width: 100%;
+      padding: 9px 0;
+      border: none;
+      border-radius: 10px;
+      background: #ffffff;
+      color: #111111;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    #popup-close:hover {
+      background: #ffe566; /* 和模型高亮黄呼应 */
+    }
+  </style>
+
+  <!--
+    importmap：告诉浏览器“three”和“three/addons/”要从哪个 CDN 地址下载。
+    现代 Three.js 必须用 ES Module + importmap，不能再用旧的 <script src="three.min.js">。
+    版本号 0.180.0 是较新的稳定版；三个模块必须用同一个版本、同一家 CDN。
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- 加载遮罩：正中间显示文字和进度条，LoadingManager 完成后隐藏 -->
+  <div id="loading">
+    <div id="loading-text">正在加载模型...</div>
+    <div id="loading-bar">
+      <div id="loading-bar-fill"></div>
+    </div>
+    <div id="loading-percent">0%</div>
+  </div>
+
+  <!-- 点击零件后弹出的说明框，默认隐藏 -->
+  <div id="info-popup">
+    <h3>零件说明</h3>
+    <p id="popup-text">这是一个桥梁零件</p>
+    <button id="popup-close" type="button">关闭</button>
+  </div>
+
+  <!--
+    type="module" 才能使用 import 语法。
+    下面整段就是 Three.js 程序：建场景 → 加灯 → 加载模型 → 鼠标控制 → 每帧渲染。
+  -->
+  <script type="module">
+    // 从 CDN 引入 Three.js 核心库（场景、相机、灯光、渲染器都在这里）
+    import * as THREE from 'three';
+
+    // 引入轨道控制器：鼠标左键旋转、右键平移、滚轮缩放
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // 引入 GLTF 加载器：用来读 .glb / .gltf 三维模型文件
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // ---------- 1. 场景：所有 3D 物体、灯光都放进这个“房间” ----------
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111); // 场景背景色，和 CSS 保持一致
+
+    // ---------- 2. 相机：相当于人的眼睛，决定从哪个角度看模型 ----------
+    // PerspectiveCamera(视野角度, 宽高比, 近裁剪面, 远裁剪面)
+    // 75 度视野比较自然；近 0.1、远 1000 表示太近或太远的东西不画
+    const camera = new THREE.PerspectiveCamera(
+      75,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(3, 2, 5); // 先把相机放到一个大概能看见东西的位置
+
+    // ---------- 3. 渲染器：真正把 3D 场景画到网页上 ----------
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true // 抗锯齿，让模型边缘更平滑
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight); // 画布尺寸等于窗口大小
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 适配高清屏，上限 2 避免太卡
+    renderer.outputColorSpace = THREE.SRGBColorSpace; // 正确的颜色空间，模型颜色不会发灰
+    document.body.appendChild(renderer.domElement); // 把 canvas 加到页面里
+
+    // ---------- 4. 灯光：没有光，模型会全黑 ----------
+    // 环境光：四面八方均匀照亮，避免背面全黑。0xffffff 白色，0.6 是强度
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    // 方向光：像太阳一样从某个方向打过来，能产生明暗层次。强度 1.2
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(5, 10, 7.5); // 光源位置（从右上前方照过来）
+    scene.add(directionalLight);
+
+    // 再补一盏较弱的方向光从对面打，减少死黑阴影
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    fillLight.position.set(-5, 2, -5);
+    scene.add(fillLight);
+
+    // ---------- 5. 轨道控制器：用鼠标操作相机 ----------
+    // 第一个参数是相机，第二个是监听鼠标的 DOM（必须是渲染器的 canvas）
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; // 开启惯性，松开鼠标后还会慢慢停下来，手感更好
+    controls.dampingFactor = 0.05; // 惯性大小
+    controls.enablePan = true;     // 允许右键平移（默认就是开的，写出来方便对照）
+    controls.enableZoom = true;    // 允许滚轮缩放
+    controls.enableRotate = true;  // 允许左键旋转
+    // 说明：左键拖动 = 旋转；右键拖动 = 平移；滚轮 = 缩放
+
+    // ---------- 6. 弹窗相关 DOM ----------
+    const popup = document.getElementById('info-popup');
+    const popupText = document.getElementById('popup-text');
+    const popupClose = document.getElementById('popup-close');
+
+    // 点击“关闭”后隐藏弹窗
+    popupClose.addEventListener('click', function () {
+      popup.style.display = 'none';
+    });
+
+    /**
+     * 根据乱码名字里的后缀，返回给用户看的中文说明。
+     * 模型转换后名字类似 Admi3C34E21Dko4x_2，所以用 includes 判断是否包含 _2 / _4 / _5。
+     */
+    function getPartDescription(name) {
+      if (name.includes('_2')) {
+        return '这是桥梁主承重柱，负责支撑上方重量';
+      }
+      if (name.includes('_4')) {
+        return '这是蓝色交叉支撑杆，用于增加桥梁稳定性';
+      }
+      if (name.includes('_5')) {
+        return '这是紫色连接横杆，用于连接两侧立柱';
+      }
+      return '这是一个桥梁零件';
+    }
+
+    // ---------- 7. 射线检测（Raycaster）：点击 + 悬停都靠它 ----------
+    // 想象从相机射出一根射线，穿过鼠标在屏幕上的位置，看它碰到了哪些网格
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2(); // 鼠标在“标准化设备坐标”里的位置（范围 -1 到 +1）
+
+    let loadedModel = null; // 模型加载完成后才赋值，点击/悬停时只检测模型本身
+
+    // 当前被鼠标划过的网格；没有划过任何零件时为 null
+    let hoveredObject = null;
+    // 高亮用的黄色，只改 material.emissive（自发光），不改原来的贴图/底色
+    const HIGHLIGHT_EMISSIVE = new THREE.Color(0xffff00);
+
+    /**
+     * 把屏幕像素坐标转成 Three.js 的 NDC 坐标，并更新射线。
+     * 屏幕左上角大约是 (-1, +1)，右下角大约是 (+1, -1)，画面中心是 (0, 0)。
+     */
+    function updateRaycaster(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+    }
+
+    /**
+     * 一个网格可能有单份材质，也可能是材质数组。
+     * 第一次操作时 clone 一份，避免改 emissive 时把共用这份材质的其他零件一起点亮。
+     */
+    function getMaterials(object) {
+      if (!object.material) return [];
+      return Array.isArray(object.material) ? object.material : [object.material];
+    }
+
+    function ensureOwnMaterials(object) {
+      // userData 是 Three.js 留给我们存自定义数据的地方
+      if (object.userData.materialCloned) return;
+      if (Array.isArray(object.material)) {
+        object.material = object.material.map(function (m) { return m.clone(); });
+      } else if (object.material) {
+        object.material = object.material.clone();
+      }
+      object.userData.materialCloned = true;
+    }
+
+    /**
+     * 记住这份材质原来的 emissive 和 emissiveIntensity，方便鼠标移开后还原。
+     */
+    function saveOriginalEmissive(object) {
+      if (object.userData.originalEmissive) return;
+      object.userData.originalEmissive = getMaterials(object).map(function (mat) {
+        return {
+          emissive: mat.emissive ? mat.emissive.clone() : null,
+          emissiveIntensity: typeof mat.emissiveIntensity === 'number' ? mat.emissiveIntensity : null
+        };
+      });
+    }
+
+    /**
+     * 高亮：只修改 material.emissive 为黄色。
+     * 原来的 color / 贴图不动，移开鼠标后可以完整还原。
+     */
+    function highlightObject(object) {
+      ensureOwnMaterials(object);
+      saveOriginalEmissive(object);
+      getMaterials(object).forEach(function (mat) {
+        if (mat.emissive) {
+          mat.emissive.copy(HIGHLIGHT_EMISSIVE);
+        }
+        if (typeof mat.emissiveIntensity === 'number') {
+          mat.emissiveIntensity = 0.85; // 让黄色自发光更明显一点
+        }
+      });
+    }
+
+    /**
+     * 把零件的 emissive 恢复成刚加载时的样子。
+     */
+    function restoreObject(object) {
+      if (!object || !object.userData.originalEmissive) return;
+      const mats = getMaterials(object);
+      object.userData.originalEmissive.forEach(function (saved, i) {
+        if (!mats[i]) return;
+        if (saved.emissive && mats[i].emissive) {
+          mats[i].emissive.copy(saved.emissive);
+        }
+        if (saved.emissiveIntensity !== null && typeof mats[i].emissiveIntensity === 'number') {
+          mats[i].emissiveIntensity = saved.emissiveIntensity;
+        }
+      });
+    }
+
+    /**
+     * 取消当前高亮，并把鼠标光标恢复成默认箭头。
+     */
+    function clearHover() {
+      if (hoveredObject) {
+        restoreObject(hoveredObject);
+        hoveredObject = null;
+      }
+      renderer.domElement.style.cursor = 'default';
+    }
+
+    // 用来区分“点击”和“拖动旋转”：按下后如果鼠标移动太多，就不当作点击
+    const clickStart = { x: 0, y: 0 };
+    const CLICK_MOVE_LIMIT = 5; // 像素：移动超过 5px 视为拖动，不触发点击
+
+    renderer.domElement.addEventListener('pointerdown', function (event) {
+      clickStart.x = event.clientX;
+      clickStart.y = event.clientY;
+    });
+
+    // 监听鼠标 click：点到模型时弹出说明
+    renderer.domElement.addEventListener('click', function (event) {
+      // 如果模型还没加载完，直接返回
+      if (!loadedModel) return;
+
+      // 拖动旋转也会触发 click，这里过滤掉明显的拖动
+      const movedX = Math.abs(event.clientX - clickStart.x);
+      const movedY = Math.abs(event.clientY - clickStart.y);
+      if (movedX > CLICK_MOVE_LIMIT || movedY > CLICK_MOVE_LIMIT) return;
+
+      updateRaycaster(event);
+
+      // 第二个参数 true 表示递归检测模型内部的所有子网格（GLB 通常有很多层 Group）
+      const hits = raycaster.intersectObject(loadedModel, true);
+
+      if (hits.length > 0) {
+        // hits 已经按距离从近到远排好，第 0 个就是最前面被点到的物体
+        const clickedObject = hits[0].object;
+        console.log(clickedObject.name); // 继续在控制台打印名字，方便你对照
+
+        // 按名字后缀决定弹窗文案，然后显示弹窗
+        popupText.textContent = getPartDescription(clickedObject.name);
+        popup.style.display = 'block';
+      }
+    });
+
+    // 鼠标在画布上移动：划过哪个零件，哪个就用 emissive 变黄；移开则还原
+    renderer.domElement.addEventListener('mousemove', function (event) {
+      if (!loadedModel) return;
+
+      updateRaycaster(event);
+      const hits = raycaster.intersectObject(loadedModel, true);
+
+      if (hits.length > 0) {
+        const object = hits[0].object;
+
+        // 还是同一个零件：只保证光标是小手，不必反复改材质
+        if (object === hoveredObject) {
+          renderer.domElement.style.cursor = 'pointer';
+          return;
+        }
+
+        // 先把上一个零件还原，再高亮新的
+        clearHover();
+        hoveredObject = object;
+        highlightObject(object);
+        renderer.domElement.style.cursor = 'pointer'; // 悬停在模型上：小手
+      } else {
+        // 射线没碰到模型（点到了空白背景）：还原高亮，光标变回箭头
+        clearHover();
+      }
+    });
+
+    // 鼠标离开整张画布时，也要把高亮和光标清掉
+    renderer.domElement.addEventListener('mouseleave', function () {
+      clearHover();
+    });
+
+    // ---------- 8. 用 LoadingManager + GLTFLoader 加载当前目录下的 model.glb ----------
+    const loadingEl = document.getElementById('loading');
+    const loadingBarFill = document.getElementById('loading-bar-fill');
+    const loadingPercent = document.getElementById('loading-percent');
+    const loadingText = document.getElementById('loading-text');
+
+    /**
+     * 更新进度条宽度和百分比文字。
+     * percent 取值 0～100。
+     */
+    function setLoadingProgress(percent) {
+      const safe = Math.max(0, Math.min(100, Math.round(percent)));
+      loadingBarFill.style.width = safe + '%';
+      loadingPercent.textContent = safe + '%';
+    }
+
+    // LoadingManager：统一监听“开始 / 进度 / 完成 / 失败”
+    const manager = new THREE.LoadingManager();
+
+    // 某个资源开始下载时
+    manager.onStart = function (url, itemsLoaded, itemsTotal) {
+      loadingEl.style.display = 'flex';
+      loadingText.textContent = '正在加载模型...';
+      setLoadingProgress(0);
+    };
+
+    // 进度回调：itemsLoaded / itemsTotal 是“文件个数”
+    // 单个 glb 时这里可能一下子从 0 跳到 100，所以下面 loader.load 里还会用字节进度把条子拉顺
+    manager.onProgress = function (url, itemsLoaded, itemsTotal) {
+      if (itemsTotal > 0) {
+        setLoadingProgress((itemsLoaded / itemsTotal) * 100);
+      }
+    };
+
+    // 全部资源加载完成：隐藏正中间的加载界面
+    manager.onLoad = function () {
+      setLoadingProgress(100);
+      loadingEl.style.display = 'none';
+    };
+
+    // 某个资源失败
+    manager.onError = function (url) {
+      console.error('资源加载失败：', url);
+      loadingText.textContent = '模型加载失败。请用本地服务器打开（不要直接双击 html）。';
+    };
+
+    // 把 manager 传给 GLTFLoader，加载过程就会汇报给上面这些回调
+    const loader = new GLTFLoader(manager);
+
+    // load(路径, 成功回调, 进度回调, 失败回调)
+    loader.load(
+      './model.glb', // 和 index.html 放在同一文件夹里的模型文件
+      function (gltf) {
+        // 加载成功：gltf.scene 就是模型的根节点
+        const model = gltf.scene;
+        loadedModel = model; // 保存下来，给上面的点击 / 悬停检测用
+        scene.add(model);
+
+        // 把模型挪到画面中心，并根据大小自动调整相机距离，避免太大或太小看不见
+        fitCameraToModel(model, camera, controls);
+        // 遮罩的隐藏交给 manager.onLoad，这里不用再写一遍
+      },
+      function (xhr) {
+        // 字节级进度：模型有 6MB，用这个条子才会一点点往前走
+        if (xhr && xhr.total) {
+          setLoadingProgress((xhr.loaded / xhr.total) * 100);
+        }
+      },
+      function (error) {
+        // 加载失败：常见原因是用双击 html 打开（file://），浏览器会拦截本地文件
+        console.error('模型加载失败：', error);
+        loadingText.textContent = '模型加载失败。请用本地服务器打开（不要直接双击 html）。';
+      }
+    );
+
+    /**
+     * 根据模型包围盒，把相机拉到能完整看见模型的位置。
+     * 不同 glb 尺寸差很多，新手最容易遇到“黑屏其实是模型太远/太大”。
+     */
+    function fitCameraToModel(model, camera, controls) {
+      // Box3 会算出模型在空间里占的最小立方盒子
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());   // 盒子的长宽高
+      const center = box.getCenter(new THREE.Vector3()); // 盒子的中心点
+
+      // 把控制器的“看向点”设成模型中心，旋转会绕着模型转
+      controls.target.copy(center);
+
+      // 取模型最长的一边，用来估算相机该退多远
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = camera.fov * (Math.PI / 180); // 视野角度转成弧度
+      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+      cameraZ *= 1.8; // 再多退一点，四周留白，不会贴得太近
+
+      // 相机放到中心斜上方，这样能同时看到顶面和侧面
+      camera.position.set(center.x + cameraZ * 0.6, center.y + cameraZ * 0.4, center.z + cameraZ);
+
+      // 近远裁剪面也按模型大小调整，太小会裁掉模型，太大精度会变差
+      camera.near = cameraZ / 100;
+      camera.far = cameraZ * 100;
+      camera.updateProjectionMatrix(); // 改了 near/far/aspect 后必须调用这一行才生效
+      controls.update();
+    }
+
+    // ---------- 9. 窗口大小改变时自适应 ----------
+    window.addEventListener('resize', function () {
+      // 相机宽高比必须跟着窗口变，否则画面会拉伸变形
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+
+      // 渲染器画布也改成新的窗口尺寸
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    });
+
+    // ---------- 10. 动画循环：每一帧都要渲染一次，画面才会动 ----------
+    function animate() {
+      requestAnimationFrame(animate); // 告诉浏览器：下一帧还调用我自己
+
+      controls.update(); // 开了 enableDamping 就必须每帧 update，惯性才生效
+      renderer.render(scene, camera); // 用当前相机把场景画出来
+    }
+    animate(); // 启动循环
+  </script>
+</body>
+</html>
